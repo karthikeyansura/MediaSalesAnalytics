@@ -222,18 +222,19 @@ quarterlyRevenue$q3_revenue <- dollar(quarterlyRevenue$q3_revenue)
 quarterlyRevenue$q4_revenue <- dollar(quarterlyRevenue$q4_revenue)
 quarterlyRevenue$avg_revenue <- dollar(quarterlyRevenue$avg_revenue)
 
-# Create header text first
-header_text <- sprintf("Quarterly Revenue %d to %d", min_year, max_year)
+# Create column names including the year range
+column_names <- c("Country", "Q1", "Q2", "Q3", "Q4", "Average")
 
-# Create table
-kable(quarterlyRevenue, 
-      col.names = c("Country", "Q1", "Q2", "Q3", "Q4", "Average"),
+# Create and render the table without the add_header_above function
+result_table <- kable(quarterlyRevenue, 
+      col.names = column_names,
       align = c("l", "r", "r", "r", "r", "r"),
-      caption = "Cumulative and Average Quarterly Revenue") %>%
-  add_header_above(c(" " = 1, header_text = 5)) %>%
+      caption = paste0("Cumulative and Average Quarterly Revenue (", min_year, " to ", max_year, ")")) %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
                 full_width = TRUE) %>%
   row_spec(0, bold = TRUE, background = "#f0f0f0")
+
+result_table
 ```
 
 ## Customer Distribution
