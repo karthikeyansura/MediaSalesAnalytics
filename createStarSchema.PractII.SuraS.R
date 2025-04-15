@@ -84,7 +84,7 @@ createTimeDimension <- function(con) {
   # Drop existing dimension if exists
   executeSQL(con, "DROP TABLE IF EXISTS dim_time;")
   
-  # Create time dimension table - FIXED: removed partitioning
+  # Create time dimension table
   sql <- "
   CREATE TABLE dim_time (
     time_key INT PRIMARY KEY,
@@ -176,7 +176,7 @@ createSalesFact <- function(con) {
   # Drop existing fact if exists
   executeSQL(con, "DROP TABLE IF EXISTS fact_sales;")
   
-  # Create sales fact table - FIXED: removed partitioning and kept foreign keys
+  # Create sales fact table
   sql <- "
   CREATE TABLE fact_sales (
     sales_key BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -210,7 +210,7 @@ createOBTFact <- function(con) {
   # Drop existing OBT if exists
   executeSQL(con, "DROP TABLE IF EXISTS fact_sales_obt;")
   
-  # Create OBT fact table - FIXED: removed partitioning
+  # Create OBT fact table
   sql <- "
   CREATE TABLE fact_sales_obt (
     sales_obt_key BIGINT AUTO_INCREMENT PRIMARY KEY,
