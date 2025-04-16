@@ -1,844 +1,793 @@
-# Title: Part C / Extract, Transform and Load Data
-# Course Name: CS5200 Database Management Systems
-# Author: Your Name
-# Semester: Spring 2025
+# title: "Part B / Create Analytics Datamart"
+# author: "Sai Karthikeyan, Sura"
+# date: "Spring 2025"
 
-# Function to install packages on demand
+options(warn = -1)
+
+# Install Required Packages
 installPackagesOnDemand <- function(packages) {
   installed_packages <- packages %in% rownames(installed.packages())
-  if (any(!installed_packages)) {
+  if (any(installed_packages == FALSE)) {
     install.packages(packages[!installed_packages])
   }
 }
 
-# Function to load required packages
+# Load Required Packages
 loadRequiredPackages <- function(packages) {
+  # load required packages
   for (package in packages) {
-    suppressMessages(library(package, character.only = TRUE))
+    suppressMessages({
+      library(package, character.only = TRUE)
+    })
   }
 }
 
-# Function to release Aiven connections if threshold is exceeded
-releaseAivenConnections <- function(threshold = 15) {
-  active_cons <- dbListConnections(RMySQL::MySQL())
-  if (length(active_cons) >= threshold) {
-    cat("[INFO] Threshold reached. Disconnecting existing MySQL connections...\n")
-    for (con in active_cons) {
-      dbDisconnect(con)
+# Close Db Connections Over Threshold
+closeDbConnectionsOverThreshold <- function() {
+  threshold <- 10 # Aiven allows 16 open connections, threshold is set to 10
+  currentOpenConnections <- dbListConnections(MySQL())
+  if (length(currentOpenConnections) > threshold) {
+    for (conn in currentOpenConnections) {
+      dbDisconnect(conn)
     }
-    cat("[INFO] Existing MySQL connections closed.\n")
   }
 }
 
-# Function to connect to the cloud MySQL database
-connectToMySQL <- function() {
-  releaseAivenConnections()
-  
+# Connect to MySQL Database
+connectToMySQLDatabase <- function() {
+  # db credentials
   dbName <- "defaultdb"
   dbUser <- "avnadmin"
   dbPassword <- "AVNS_4zUOM58G58RIBn3nQqg"
   dbHost <- "dbserver-cs5200-media-sales-analytics.b.aivencloud.com"
   dbPort <- 17041
   
-  con <- tryCatch(
-    {
-      dbConnect(
-        RMySQL::MySQL(),
-        user = dbUser,
-        password = dbPassword,
-        dbname = dbName,
-        host = dbHost,
-        port = dbPort
-      )
-    },
-    error = function(e) {
-      return(e$message)
-    }
-  )
-  return(con)
+  tryCatch({
+    closeDbConnectionsOverThreshold()
+    dbCon <- dbConnect(
+      RMySQL::MySQL(),
+      user = dbUser,
+      password = dbPassword,
+      dbname = dbName,
+      host = dbHost,
+      port = dbPort
+    )
+    cat("Connected to database successfully.\n")
+    return(dbCon)
+  }, error = function(err) {
+    cat("Error connecting to database:", err$message, "\n")
+    stop("Database connection failed.")
+  })
 }
 
-# Function to connect to the Film Sales SQLite database
-connectToFilmDB <- function() {
-  con <- tryCatch(
-    {
-      dbConnect(RSQLite::SQLite(), "film-sales.db")
-    },
-    error = function(e) {
-      return(e$message)
-    }
-  )
-  return(con)
+# Connect to SQLite Database
+connectToSQLiteDb <- function(dbPath) {
+  tryCatch({
+    dbCon <- dbConnect(RSQLite::SQLite(), dbname = dbPath)
+    cat("Connected to", dbPath, "SQLite database successfully.\n")
+    return(dbCon)
+  }, error = function(err) {
+    cat("Error connecting to SQLite database:", err$message, "\n")
+    stop("SQLite database connection failed.")
+  })
 }
 
-# Function to connect to the Music Sales SQLite database
-connectToMusicDB <- function() {
-  con <- tryCatch(
-    {
-      dbConnect(RSQLite::SQLite(), "music-sales.db")
-    },
-    error = function(e) {
-      return(e$message)
-    }
-  )
-  return(con)
+# Print Line Separator
+printLine <- function() {
+  cat("--------------------------------------------------\n")
 }
 
-# Function to execute SQL query with error handling
-executeQuery <- function(con, sqlQuery, silent = FALSE) {
-  result <- tryCatch(
-    {
-      if (!silent) cat("[SQL] Executing query:", sqlQuery, "\n")
-      dbGetQuery(con, sqlQuery)
-    },
-    error = function(e) {
-      cat("[ERROR] SQL query failed:", e$message, "\n")
-      cat("[SQL] Failed query:", sqlQuery, "\n")
-      return(NULL)
-    }
-  )
-  if (!is.null(result) && !silent) {
-    cat("[SQL] Query successful. Rows returned:", nrow(result), "\n")
+# Insert Data in Batches
+insertInBatches <- function(dbCon, batchSize = 500, query, values) {
+  numBatches <- ceiling(length(values) / batchSize)
+  for (i in 1:numBatches) {
+    startIdx <- (i - 1) * batchSize + 1
+    endIdx <- min(i * batchSize, length(values))
+    batchValues <- values[startIdx:endIdx]
+    completeQuery <- paste(query, paste(batchValues, collapse = ","))
+    #print(query) # for debugging
+    dbExecute(dbCon, completeQuery)
   }
-  return(result)
 }
 
-# Function to execute SQL statement with error handling
-executeSQL <- function(con, sqlStatement, silent = FALSE) {
-  result <- tryCatch(
-    {
-      if (!silent) cat("[SQL] Executing:", sqlStatement, "\n")
-      dbExecute(con, sqlStatement)
-    },
-    error = function(e) {
-      cat("[ERROR] SQL execution failed:", e$message, "\n")
-      cat("[SQL] Failed statement:", sqlStatement, "\n")
-      return(NULL)
-    }
-  )
-  if (!is.null(result) && !silent) {
-    cat("[SQL] Execution successful. Rows affected:", result, "\n")
-  }
-  return(result)
+# Extract Data from Source
+extractDataFromSource <- function(dbCon, query) {
+  # extract data from source database
+  data <- dbGetQuery(dbCon, query)
+  return(data)
 }
 
-# Function to check if required tables exist
-checkRequiredTables <- function(con) {
-  cat("[INFO] Checking for required tables...\n")
-  
-  requiredTables <- c("dim_time", "dim_country", "dim_product_type", 
-                      "dim_customer", "fact_sales", "fact_sales_obt")
-  
-  allTablesExist <- TRUE
-  
-  for (table in requiredTables) {
-    tableExistsQuery <- sprintf("
-      SELECT COUNT(*) as count 
-      FROM information_schema.tables 
-      WHERE table_schema = 'defaultdb' 
-      AND table_name = '%s'
-    ", table)
-    
-    result <- executeQuery(con, tableExistsQuery, silent = TRUE)
-    
-    if (is.null(result) || result$count[1] == 0) {
-      cat("[ERROR] Required table", table, "does not exist. Please run createStarSchema.R first.\n")
-      allTablesExist <- FALSE
-    }
-  }
-  
-  return(allTablesExist)
-}
-
-# Function to extract unique dates from both databases and load into dim_time
-loadTimeDimension <- function(filmCon, musicCon, mysqlCon) {
-  cat("[INFO] Loading time dimension...\n")
-  
-  # Extract payment dates from Film Sales
-  filmDates <- executeQuery(filmCon, "
-    SELECT DISTINCT date(payment_date) as date_value 
-    FROM payment 
-    ORDER BY date_value
-  ")
-  
-  # Extract invoice dates from Music Sales
-  musicDates <- executeQuery(musicCon, "
-    SELECT DISTINCT date(InvoiceDate) as date_value 
-    FROM invoices 
-    ORDER BY date_value
-  ")
-  
-  # Combine all dates
-  allDates <- unique(c(filmDates$date_value, musicDates$date_value))
-  
-  # Clear existing time dimension data
-  executeSQL(mysqlCon, "DELETE FROM dim_time;")
-  
-  # Insert dates in batches (more efficient than row-by-row)
-  batchSize <- 100
-  totalDates <- length(allDates)
-  
-  for (i in seq(1, totalDates, by = batchSize)) {
-    endIdx <- min(i + batchSize - 1, totalDates)
-    batch <- allDates[i:endIdx]
-    
-    if (length(batch) > 0) {
-      # Prepare batch insert values
-      valuesList <- character(length(batch))
-      
-      for (j in 1:length(batch)) {
-        date <- as.Date(batch[j])
-        if (!is.na(date)) {
-          timeKey <- as.numeric(format(date, "%Y%m%d"))
-          dayOfWeek <- weekdays(date)
-          dayOfMonth <- as.numeric(format(date, "%d"))
-          monthName <- months(date)
-          monthNumber <- as.numeric(format(date, "%m"))
-          quarter <- ceiling(monthNumber / 3)
-          year <- as.numeric(format(date, "%Y"))
-          
-          valuesList[j] <- sprintf("(%d, '%s', '%s', %d, '%s', %d, %d, %d)",
-                                   timeKey, date, dayOfWeek, dayOfMonth, 
-                                   monthName, monthNumber, quarter, year)
-        }
-      }
-      
-      # Execute batch insert
-      insertSQL <- paste0("INSERT INTO dim_time (time_key, date, day_of_week, day_of_month, month_name, month_number, quarter, year) VALUES ", 
-                          paste(valuesList, collapse = ", "))
-      executeSQL(mysqlCon, insertSQL)
-    }
-  }
-  
-  # Verify loading
-  countResult <- executeQuery(mysqlCon, "SELECT COUNT(*) as count FROM dim_time")
-  cat("[INFO] Loaded", countResult$count, "time dimension records.\n")
-}
-
-# Function to extract countries from both databases and load into dim_country
-loadCountryDimension <- function(filmCon, musicCon, mysqlCon) {
-  cat("[INFO] Loading country dimension...\n")
-  
-  # Extract countries from Film Sales
-  filmCountries <- executeQuery(filmCon, "
-    SELECT DISTINCT country, country_id 
-    FROM country 
-    ORDER BY country
-  ")
-  
-  # Extract countries from Music Sales
-  musicCountries <- executeQuery(musicCon, "
-    SELECT DISTINCT Country 
-    FROM customers 
-    WHERE Country IS NOT NULL AND Country != '' 
-    UNION 
-    SELECT DISTINCT BillingCountry 
-    FROM invoices 
-    WHERE BillingCountry IS NOT NULL AND BillingCountry != '' 
-    ORDER BY Country
-  ")
-  
-  # Clear existing country dimension data
-  executeSQL(mysqlCon, "DELETE FROM dim_country;")
-  
-  # Combine all countries
-  allCountries <- unique(c(filmCountries$country, musicCountries$Country))
-  allCountries <- allCountries[!is.na(allCountries) & allCountries != ""]
-  
-  # Batch insert countries
-  batchSize <- 50
-  totalCountries <- length(allCountries)
-  
-  for (i in seq(1, totalCountries, by = batchSize)) {
-    endIdx <- min(i + batchSize - 1, totalCountries)
-    batch <- allCountries[i:endIdx]
-    
-    if (length(batch) > 0) {
-      # Prepare batch insert values
-      valuesList <- character(length(batch))
-      
-      for (j in 1:length(batch)) {
-        country <- batch[j]
-        valuesList[j] <- sprintf("('%s')", gsub("'", "''", country))
-      }
-      
-      # Execute batch insert
-      insertSQL <- paste0("INSERT INTO dim_country (country_name) VALUES ", 
-                          paste(valuesList, collapse = ", "))
-      executeSQL(mysqlCon, insertSQL)
-    }
-  }
-  
-  # Verify loading
-  countResult <- executeQuery(mysqlCon, "SELECT COUNT(*) as count FROM dim_country")
-  cat("[INFO] Loaded", countResult$count, "country dimension records.\n")
-}
-
-# Function to load all customer data with batch processing
-loadCustomerDimension <- function(filmCon, musicCon, mysqlCon) {
-  cat("[INFO] Loading customer dimension...\n")
-  
-  # Clear existing customer dimension data
-  executeSQL(mysqlCon, "DELETE FROM dim_customer;")
-  
-  # Extract film customers with country information
-  filmCustomers <- executeQuery(filmCon, "
+# SQL Query to Extract Film Location Data
+getFilmLocationQuery <- function() {
+  return("
     SELECT 
-      c.customer_id, 
-      c.first_name, 
-      c.last_name, 
-      c.email, 
-      co.country 
-    FROM customer c
+      a.address_id AS source_id,
+      'FILM' AS source_system,
+      a.address,
+      c.city,
+      NULL AS state_province,
+      a.postal_code,
+      co.country,
+      NULL AS region,
+      a.last_update
+    FROM address a
+    JOIN city c ON a.city_id = c.city_id
+    JOIN country co ON c.country_id = co.country_id
+  ")
+}
+
+# SQL Query to Extract Music Location Data
+getMusicLocationQuery <- function() {
+  return("
+     SELECT 
+      CustomerId AS source_id,
+      'MUSIC' AS source_system,
+      Address AS address,
+      City AS city,
+      State AS state_province,
+      PostalCode AS postal_code,
+      Country AS country,
+      NULL AS region,
+      CURRENT_TIMESTAMP AS last_update
+    FROM customers
+    WHERE Address IS NOT NULL
+  ")
+}
+
+# ETL Pipeline for Location Data
+locationDataETL <- function(filmSalesDbCon, musicSalesDbCon, analyticsDbCon) {
+  # extract location data from both source databases
+  filmLocationData <- extractDataFromSource(filmSalesDbCon, getFilmLocationQuery())
+  musicLocationData <- extractDataFromSource(musicSalesDbCon, getMusicLocationQuery())
+  allLocations <- rbind(filmLocationData, musicLocationData) # combine data
+  
+  # transform the data
+  allLocations$state_province[is.na(allLocations$state_province)] <- NA
+  allLocations$postal_code[is.na(allLocations$postal_code)] <- NA
+  allLocations$region[is.na(allLocations$region)] <- NA
+  
+  # insert query
+  insertQuery <- paste0("INSERT INTO dim_location ",
+                        "(source_id, source_system, address, city, state_province, 
+                          postal_code, country, region) ", "
+                        VALUES ")
+  
+  # format values for batch insert
+  values <- apply(allLocations, 1, function(row) {
+    formatSqlValue <- function(val) {
+      if (is.na(val)) {
+        return("NULL")
+      } else {
+        # escape single quotes in the string value
+        escaped_val <- gsub("'", "''", as.character(val))
+        return(paste0("'", escaped_val, "'"))
+      }
+    }
+    
+    # construct the value string with proper NULL handling
+    sprintf("(%s, %s, %s, %s, %s, %s, %s, %s)",
+            formatSqlValue(row["source_id"]),
+            formatSqlValue(row["source_system"]),
+            formatSqlValue(row["address"]),
+            formatSqlValue(row["city"]),
+            formatSqlValue(row["state_province"]),
+            formatSqlValue(row["postal_code"]),
+            formatSqlValue(row["country"]),
+            formatSqlValue(row["region"]))
+  })
+  
+  # insert data in batches
+  insertInBatches(analyticsDbCon, batchSize = 500, insertQuery, values)
+  
+  cat("ETL Successful: dim_location table loaded into analytical db.\n")
+}
+
+# SQL Query to Extract Film Customer Data
+getFilmCustomerQuery <- function() {
+  return("
+    SELECT 
+      customer_id AS source_customer_id,
+      'FILM' AS source_system,
+      first_name,
+      last_name,
+      email,
+      active,
+      create_date
+    FROM customer
+  ")
+}
+
+# SQL Query to Extract Music Customer Data
+getMusicCustomerQuery <- function() {
+  return("
+    SELECT 
+      CustomerId AS source_customer_id,
+      'MUSIC' AS source_system,
+      FirstName AS first_name,
+      LastName AS last_name,
+      Email AS email,
+      1 AS active,
+      CURRENT_TIMESTAMP AS create_date
+    FROM customers
+  ")
+}
+
+# ETL Pipeline for Customer Data
+customerDataETL <- function(filmSalesDbCon, musicSalesDbCon, analyticsDbCon) {
+  # extract customer data from both source databases
+  filmCustomerData <- extractDataFromSource(filmSalesDbCon, getFilmCustomerQuery())
+  musicCustomerData <- extractDataFromSource(musicSalesDbCon, getMusicCustomerQuery())
+  allCustomers <- rbind(filmCustomerData, musicCustomerData) # combine data
+  
+  # transform the data
+  allCustomers$email[is.na(allCustomers$email)] <- NA
+  allCustomers$create_date[is.na(allCustomers$create_date)] <- NA
+
+  # insert query
+  insertQuery <- paste0("INSERT INTO dim_customer ",
+                        "(source_customer_id, source_system, first_name, 
+                          last_name, email, active, create_date) ", 
+                        "VALUES ")
+  
+  # format values for batch insert
+  values <- apply(allCustomers, 1, function(row) {
+    formatSqlValue <- function(val) {
+      if (is.na(val)) {
+        return("NULL")
+      } else {
+        # escape single quotes in the string value
+        escaped_val <- gsub("'", "''", as.character(val))
+        return(paste0("'", escaped_val, "'"))
+      }
+    }
+    
+    # construct the value string with proper NULL handling
+    sprintf("(%s, %s, %s, %s, %s, %s, %s)",
+            formatSqlValue(row["source_customer_id"]),
+            formatSqlValue(row["source_system"]),
+            formatSqlValue(row["first_name"]),
+            formatSqlValue(row["last_name"]),
+            formatSqlValue(row["email"]),
+            formatSqlValue(row["active"]),
+            formatSqlValue(row["create_date"]))
+  })
+  
+  # insert data in batches
+  insertInBatches(analyticsDbCon, batchSize = 500, insertQuery, values)
+  
+  cat("ETL Successful: dim_customer table loaded into analytical db.\n")
+}
+
+# SQL Query to Extract Film Product Data
+getFilmProductQuery <- function() {
+  return("
+     SELECT 
+      f.film_id AS source_product_id,
+      'FILM' AS source_system,
+      'FILM' AS product_type,
+      f.title,
+      c.name AS category_genre,
+      NULL AS artist_actor,
+      f.release_year,
+      l.name AS language,
+      NULL AS media_type,
+      f.rental_rate AS unit_price,
+      f.length AS duration
+    FROM film f
+    LEFT JOIN film_category fc ON f.film_id = fc.film_id
+    LEFT JOIN category c ON fc.category_id = c.category_id
+    LEFT JOIN language l ON f.language_id = l.language_id
+  ")
+}
+
+# SQL Query to Extract Music Product Data
+getMusicProductQuery <- function() {
+  return("
+    SELECT 
+      t.TrackId AS source_product_id,
+      'MUSIC' AS source_system,
+      'TRACK' AS product_type,
+      t.Name AS title,
+      g.Name AS category_genre,
+      ar.Name AS artist_actor,
+      NULL AS release_year,
+      NULL AS language,
+      mt.Name AS media_type,
+      t.UnitPrice AS unit_price,
+      t.Milliseconds AS duration
+    FROM tracks t
+    LEFT JOIN genres g ON t.GenreId = g.GenreId
+    LEFT JOIN albums al ON t.AlbumId = al.AlbumId
+    LEFT JOIN artists ar ON al.ArtistId = ar.ArtistId
+    LEFT JOIN media_types mt ON t.MediaTypeId = mt.MediaTypeId
+  ")
+}
+
+# ETL Pipeline for Product Data
+productDataETL <- function(filmSalesDbCon, musicSalesDbCon, analyticsDbCon) {
+  # extract product data from both source databases
+  filmProductData <- extractDataFromSource(filmSalesDbCon, getFilmProductQuery())
+  musicProductData <- extractDataFromSource(musicSalesDbCon, getMusicProductQuery())
+  allProducts <- rbind(filmProductData, musicProductData) # combine data
+  
+  # transform the data
+  allProducts$category_genre[is.na(allProducts$category_genre)] <- NA
+  allProducts$artist_actor[is.na(allProducts$artist_actor)] <- NA
+  allProducts$release_year[is.na(allProducts$release_year)] <- NA
+  allProducts$language[is.na(allProducts$language)] <- NA
+  allProducts$media_type[is.na(allProducts$media_type)] <- NA
+  
+  # insert query
+  insertQuery <- paste0("INSERT INTO dim_product ",
+                        "(source_product_id, source_system, product_type, 
+                          title, category_genre, artist_actor, release_year, 
+                          language, media_type, unit_price, duration) ", 
+                        "VALUES ")
+  
+  # format values for batch insert
+  values <- apply(allProducts, 1, function(row) {
+    formatSqlValue <- function(val) {
+      if (is.na(val)) {
+        return("NULL")
+      } else {
+        # escape single quotes in the string value
+        escaped_val <- gsub("'", "''", as.character(val))
+        return(paste0("'", escaped_val, "'"))
+      }
+    }
+    
+    # construct the value string with proper NULL handling
+    sprintf("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            formatSqlValue(row["source_product_id"]),
+            formatSqlValue(row["source_system"]),
+            formatSqlValue(row["product_type"]),
+            formatSqlValue(row["title"]),
+            formatSqlValue(row["category_genre"]),
+            formatSqlValue(row["artist_actor"]),
+            formatSqlValue(row["release_year"]),
+            formatSqlValue(row["language"]),
+            formatSqlValue(row["media_type"]),
+            formatSqlValue(row["unit_price"]),
+            formatSqlValue(row["duration"]))
+  })
+  
+  # insert data in batches
+  insertInBatches(analyticsDbCon, batchSize = 500, insertQuery, values)
+  
+  cat("ETL Successful: dim_product table loaded into analytical db.\n")
+}
+
+# ETL Pipeline for Time Data
+timeDataETL <- function(analyticsDbCon) {
+  # generate time data for several years
+  startDate <- as.Date("2000-01-01")
+  endDate <- as.Date("2013-12-31")
+  dateSeq <- seq(startDate, endDate, by="day")
+  
+  # produce date values
+  timeData <- data.frame(
+    time_key = as.integer(format(dateSeq, "%Y%m%d")),
+    full_date = format(dateSeq, "%Y-%m-%d"),
+    day_of_week = weekdays(dateSeq),
+    day_num_in_month = as.integer(format(dateSeq, "%d")),
+    day_num_in_year = as.integer(format(dateSeq, "%j")),
+    month_num = as.integer(format(dateSeq, "%m")),
+    month_name = month.abb[as.integer(format(dateSeq, "%m"))],
+    quarter = ceiling(as.integer(format(dateSeq, "%m")) / 3),
+    year = as.integer(format(dateSeq, "%Y")),
+    weekend_flag = as.integer(weekdays(dateSeq) %in% c("Saturday", "Sunday")),
+    holiday_flag = 0
+  )
+  
+  # insert query
+  insertQuery <- paste0("INSERT INTO dim_time ",
+                        "(time_key, full_date, day_of_week, day_num_in_month, 
+                          day_num_in_year, month_num, month_name, quarter, 
+                          year, weekend_flag, holiday_flag) ", 
+                        "VALUES ")
+  
+  # format values for batch insert
+  values <- apply(timeData, 1, function(row) {
+    sprintf("(%s, '%s', '%s', %s, %s, %s, '%s', %s, %s, %s, %s)",
+            as.integer(row["time_key"]), 
+            row["full_date"], 
+            row["day_of_week"], 
+            as.integer(row["day_num_in_month"]), 
+            as.integer(row["day_num_in_year"]), 
+            as.integer(row["month_num"]), 
+            row["month_name"], 
+            as.integer(row["quarter"]), 
+            as.integer(row["year"]), 
+            as.integer(row["weekend_flag"]), 
+            as.integer(row["holiday_flag"]))
+  })
+  
+  # insert data in batches
+  insertInBatches(analyticsDbCon, batchSize = 500, insertQuery, values)
+  
+  cat("ETL Successful: dim_time table loaded into analytical db.\n")
+}
+
+getFilmSalesQuery <- function() {
+  return("
+    SELECT 
+      p.payment_id AS source_transaction_id,
+      'FILM' AS source_system,
+      DATE(p.payment_date) AS transaction_date,
+      p.customer_id,
+      i.film_id AS product_id,
+      co.country,
+      1 AS quantity,
+      p.amount AS amount
+    FROM payment p
+    JOIN rental r ON p.rental_id = r.rental_id
+    JOIN inventory i ON r.inventory_id = i.inventory_id
+    JOIN customer c ON p.customer_id = c.customer_id
     JOIN address a ON c.address_id = a.address_id
     JOIN city ci ON a.city_id = ci.city_id
     JOIN country co ON ci.country_id = co.country_id
   ")
-  
-  # Get all countries and their keys
-  countryData <- executeQuery(mysqlCon, "SELECT country_key, country_name FROM dim_country")
-  
-  # Create a lookup table for country keys
-  countryLookup <- setNames(countryData$country_key, countryData$country_name)
-  
-  # Process film customers in batches
-  cat("[INFO] Loading film customers...\n")
-  batchSize <- 50
-  totalFilmCustomers <- nrow(filmCustomers)
-  
-  for (i in seq(1, totalFilmCustomers, by = batchSize)) {
-    endIdx <- min(i + batchSize - 1, totalFilmCustomers)
-    batch <- filmCustomers[i:endIdx, ]
-    
-    if (nrow(batch) > 0) {
-      # Prepare batch insert values
-      valuesList <- character(0)
-      
-      for (j in 1:nrow(batch)) {
-        sourceId <- batch$customer_id[j]
-        firstName <- batch$first_name[j]
-        lastName <- batch$last_name[j]
-        email <- batch$email[j]
-        country <- batch$country[j]
-        
-        # Get country key from lookup
-        countryKey <- countryLookup[country]
-        
-        if (!is.na(countryKey)) {
-          valuesList <- c(valuesList, sprintf("(%d, %d, '%s', '%s', '%s', %d)",
-                                              sourceId, 
-                                              1, # product_type_key for film
-                                              gsub("'", "''", firstName), 
-                                              gsub("'", "''", lastName), 
-                                              gsub("'", "''", email),
-                                              countryKey))
-        }
-      }
-      
-      if (length(valuesList) > 0) {
-        # Execute batch insert
-        insertSQL <- paste0("INSERT INTO dim_customer (source_id, product_type_key, first_name, last_name, email, country_key) VALUES ", 
-                            paste(valuesList, collapse = ", "))
-        executeSQL(mysqlCon, insertSQL)
-      }
-    }
-  }
-  
-  # Extract music customers with country information
-  musicCustomers <- executeQuery(musicCon, "
+}
+
+getMusicSalesQuery <- function() {
+  return("
     SELECT 
-      CustomerId, 
-      FirstName, 
-      LastName, 
-      Email, 
-      Country 
-    FROM customers
-    WHERE Country IS NOT NULL
+      ii.InvoiceLineId AS source_transaction_id,
+      'MUSIC' AS source_system,
+      DATE(i.InvoiceDate) AS transaction_date,
+      i.CustomerId AS customer_id,
+      ii.TrackId AS product_id,
+      i.BillingCountry AS country,
+      ii.Quantity AS quantity,
+      ii.UnitPrice AS amount
+    FROM invoice_items ii
+    JOIN invoices i ON ii.InvoiceId = i.InvoiceId
   ")
-  
-  # Process music customers in batches
-  cat("[INFO] Loading music customers...\n")
-  totalMusicCustomers <- nrow(musicCustomers)
-  
-  for (i in seq(1, totalMusicCustomers, by = batchSize)) {
-    endIdx <- min(i + batchSize - 1, totalMusicCustomers)
-    batch <- musicCustomers[i:endIdx, ]
-    
-    if (nrow(batch) > 0) {
-      # Prepare batch insert values
-      valuesList <- character(0)
-      
-      for (j in 1:nrow(batch)) {
-        sourceId <- batch$CustomerId[j]
-        firstName <- batch$FirstName[j]
-        lastName <- batch$LastName[j]
-        email <- batch$Email[j]
-        country <- batch$Country[j]
-        
-        # Get country key from lookup
-        countryKey <- countryLookup[country]
-        
-        if (!is.na(countryKey)) {
-          valuesList <- c(valuesList, sprintf("(%d, %d, '%s', '%s', '%s', %d)",
-                                              sourceId, 
-                                              2, # product_type_key for music
-                                              gsub("'", "''", firstName), 
-                                              gsub("'", "''", lastName), 
-                                              gsub("'", "''", email),
-                                              countryKey))
-        }
-      }
-      
-      if (length(valuesList) > 0) {
-        # Execute batch insert
-        insertSQL <- paste0("INSERT INTO dim_customer (source_id, product_type_key, first_name, last_name, email, country_key) VALUES ", 
-                            paste(valuesList, collapse = ", "))
-        executeSQL(mysqlCon, insertSQL)
-      }
-    }
-  }
-  
-  # Verify loading
-  countResult <- executeQuery(mysqlCon, "SELECT COUNT(*) as count FROM dim_customer")
-  cat("[INFO] Loaded", countResult$count, "customer dimension records.\n")
 }
 
-# Function to load film sales data into fact tables with batch inserts
-loadFilmSales <- function(filmCon, mysqlCon) {
-  cat("[INFO] Loading film sales facts...\n")
+salesDataETL <- function(filmSalesDbCon, musicSalesDbCon, analyticsDbCon, lookups) {
+  # extract sales data from both source databases
+  filmSalesData <- extractDataFromSource(filmSalesDbCon, getFilmSalesQuery())
+  musicSalesData <- extractDataFromSource(musicSalesDbCon, getMusicSalesQuery())
   
-  # Get all dimension lookups to avoid repeated queries
-  timeData <- executeQuery(mysqlCon, "SELECT time_key, date FROM dim_time")
-  timeLookup <- setNames(timeData$time_key, as.character(timeData$date))
+  # transform film sales
+  filmSalesData$time_key <- as.integer(format(as.Date(filmSalesData$transaction_date), "%Y%m%d"))
   
-  countryData <- executeQuery(mysqlCon, "SELECT country_key, country_name FROM dim_country")
-  countryLookup <- setNames(countryData$country_key, countryData$country_name)
+  # Create lookup keys
+  filmCustomerKeys <- paste(filmSalesData$customer_id, filmSalesData$source_system, sep = "-")
+  filmProductKeys <- paste(filmSalesData$product_id, filmSalesData$source_system, sep = "-")
+  filmLocationKeys <- paste(filmSalesData$country, filmSalesData$source_system, sep = "-")
   
-  customerData <- executeQuery(mysqlCon, "SELECT customer_key, source_id, first_name, last_name, email, country_key, product_type_key FROM dim_customer WHERE product_type_key = 1")
-  customerLookup <- setNames(customerData$customer_key, customerData$source_id)
+  # Map dimension keys using lookups
+  filmSalesData$customer_key <- lookups$customerLookup[filmCustomerKeys]
+  filmSalesData$product_key <- lookups$productLookup[filmProductKeys]
+  filmSalesData$location_key <- lookups$locationLookup[filmLocationKeys]
   
-  # Create a lookup dataframe for customer info
-  customerInfoLookup <- data.frame(
-    source_id = customerData$source_id,
-    customer_key = customerData$customer_key,
-    first_name = customerData$first_name,
-    last_name = customerData$last_name,
-    email = customerData$email,
-    country_key = customerData$country_key,
-    stringsAsFactors = FALSE
+  # Filter out rows with NA keys
+  filmSalesData <- filmSalesData[!is.na(filmSalesData$customer_key) & 
+                                   !is.na(filmSalesData$product_key) & 
+                                   !is.na(filmSalesData$location_key), ]
+  
+  # transform music sales
+  musicSalesData$time_key <- as.integer(format(as.Date(musicSalesData$transaction_date), "%Y%m%d"))
+  
+  # Create lookup keys
+  musicCustomerKeys <- paste(musicSalesData$customer_id, musicSalesData$source_system, sep = "-")
+  musicProductKeys <- paste(musicSalesData$product_id, musicSalesData$source_system, sep = "-")
+  musicLocationKeys <- paste(musicSalesData$country, musicSalesData$source_system, sep = "-")
+  
+  # Map dimension keys using lookups
+  musicSalesData$customer_key <- lookups$customerLookup[musicCustomerKeys]
+  musicSalesData$product_key <- lookups$productLookup[musicProductKeys]
+  musicSalesData$location_key <- lookups$locationLookup[musicLocationKeys]
+  
+  # Filter out rows with NA keys
+  musicSalesData <- musicSalesData[!is.na(musicSalesData$customer_key) & 
+                                     !is.na(musicSalesData$product_key) & 
+                                     !is.na(musicSalesData$location_key), ]
+  
+  # Select only needed columns
+  filmSalesSubset <- filmSalesData[, c("time_key", "customer_key", "product_key", "location_key", 
+                                       "source_system", "source_transaction_id", "transaction_date", 
+                                       "quantity", "amount")]
+  
+  musicSalesSubset <- musicSalesData[, c("time_key", "customer_key", "product_key", "location_key", 
+                                         "source_system", "source_transaction_id", "transaction_date", 
+                                         "quantity", "amount")]
+  
+  allSales <- rbind(filmSalesSubset, musicSalesSubset)
+  
+  # Ensure date format is correct
+  allSales$transaction_date <- format(as.Date(allSales$transaction_date), "%Y-%m-%d")
+  
+  # insert query
+  insertQuery <- paste0("INSERT INTO sales_facts ",
+                        "(time_key, customer_key, product_key, location_key, 
+                          source_system, source_transaction_id, transaction_date, 
+                          quantity, amount) ", 
+                        "VALUES ")
+  
+  # format values for batch insert
+  values <- apply(allSales, 1, function(row) {
+    sprintf("(%d, %d, %d, %d, '%s', '%s', '%s', %d, %f)",
+            as.integer(row["time_key"]), 
+            as.integer(row["customer_key"]), 
+            as.integer(row["product_key"]), 
+            as.integer(row["location_key"]),
+            row["source_system"], 
+            row["source_transaction_id"], 
+            row["transaction_date"],
+            as.integer(row["quantity"]), 
+            as.numeric(row["amount"]))
+  })
+  
+  # insert data in batches
+  insertInBatches(analyticsDbCon, batchSize = 500, insertQuery, values)
+  
+  cat("ETL Successful: sales_facts table loaded into analytical db.\n")
+}
+
+timeAggregatedFactsETL <- function(analyticsDbCon) {
+  
+  # Aggregation query for day level
+  dayQuery <- "
+    INSERT INTO time_agg_facts (
+      time_key, time_level, country, source_system,
+      total_revenue, avg_revenue_per_transaction, 
+      total_units_sold, avg_units_per_transaction,
+      min_units_per_transaction, max_units_per_transaction,
+      min_revenue_per_transaction, max_revenue_per_transaction,
+      customer_count, transaction_count
+    )
+    SELECT 
+      sf.time_key,
+      'DAY' AS time_level,
+      dl.country,
+      sf.source_system,
+      SUM(sf.amount) AS total_revenue,
+      AVG(sf.amount) AS avg_revenue_per_transaction,
+      SUM(sf.quantity) AS total_units_sold,
+      AVG(sf.quantity) AS avg_units_per_transaction,
+      MIN(sf.quantity) AS min_units_per_transaction,
+      MAX(sf.quantity) AS max_units_per_transaction,
+      MIN(sf.amount) AS min_revenue_per_transaction,
+      MAX(sf.amount) AS max_revenue_per_transaction,
+      COUNT(DISTINCT sf.customer_key) AS customer_count,
+      COUNT(*) AS transaction_count
+    FROM sales_facts sf
+    JOIN dim_location dl ON sf.location_key = dl.location_key
+    GROUP BY sf.time_key, dl.country, sf.source_system
+  "
+  dbExecute(analyticsDbCon, dayQuery)
+  
+  # Aggregation query for month level
+  monthQuery <- "
+    INSERT INTO time_agg_facts (
+      time_key, time_level, country, source_system,
+      total_revenue, avg_revenue_per_transaction, 
+      total_units_sold, avg_units_per_transaction,
+      min_units_per_transaction, max_units_per_transaction,
+      min_revenue_per_transaction, max_revenue_per_transaction,
+      customer_count, transaction_count
+    )
+    SELECT 
+      (dt.year * 100 + dt.month_num) AS time_key,
+      'MONTH' AS time_level,
+      dl.country,
+      sf.source_system,
+      SUM(sf.amount) AS total_revenue,
+      AVG(sf.amount) AS avg_revenue_per_transaction,
+      SUM(sf.quantity) AS total_units_sold,
+      AVG(sf.quantity) AS avg_units_per_transaction,
+      MIN(sf.quantity) AS min_units_per_transaction,
+      MAX(sf.quantity) AS max_units_per_transaction,
+      MIN(sf.amount) AS min_revenue_per_transaction,
+      MAX(sf.amount) AS max_revenue_per_transaction,
+      COUNT(DISTINCT sf.customer_key) AS customer_count,
+      COUNT(*) AS transaction_count
+    FROM sales_facts sf
+    JOIN dim_time dt ON sf.time_key = dt.time_key
+    JOIN dim_location dl ON sf.location_key = dl.location_key
+    GROUP BY dt.year, dt.month_num, dl.country, sf.source_system
+  "
+  dbExecute(analyticsDbCon, monthQuery)
+  
+  # Aggregation query for quarter level
+  quarterQuery <- "
+    INSERT INTO time_agg_facts (
+      time_key, time_level, country, source_system,
+      total_revenue, avg_revenue_per_transaction, 
+      total_units_sold, avg_units_per_transaction,
+      min_units_per_transaction, max_units_per_transaction,
+      min_revenue_per_transaction, max_revenue_per_transaction,
+      customer_count, transaction_count
+    )
+    SELECT 
+      (dt.year * 10 + dt.quarter) AS time_key,
+      'QUARTER' AS time_level,
+      dl.country,
+      sf.source_system,
+      SUM(sf.amount) AS total_revenue,
+      AVG(sf.amount) AS avg_revenue_per_transaction,
+      SUM(sf.quantity) AS total_units_sold,
+      AVG(sf.quantity) AS avg_units_per_transaction,
+      MIN(sf.quantity) AS min_units_per_transaction,
+      MAX(sf.quantity) AS max_units_per_transaction,
+      MIN(sf.amount) AS min_revenue_per_transaction,
+      MAX(sf.amount) AS max_revenue_per_transaction,
+      COUNT(DISTINCT sf.customer_key) AS customer_count,
+      COUNT(*) AS transaction_count
+    FROM sales_facts sf
+    JOIN dim_time dt ON sf.time_key = dt.time_key
+    JOIN dim_location dl ON sf.location_key = dl.location_key
+    GROUP BY dt.year, dt.quarter, dl.country, sf.source_system
+  "
+  dbExecute(analyticsDbCon, quarterQuery)
+  
+  # Aggregation query for year level
+  yearQuery <- "
+    INSERT INTO time_agg_facts (
+      time_key, time_level, country, source_system,
+      total_revenue, avg_revenue_per_transaction, 
+      total_units_sold, avg_units_per_transaction,
+      min_units_per_transaction, max_units_per_transaction,
+      min_revenue_per_transaction, max_revenue_per_transaction,
+      customer_count, transaction_count
+    )
+    SELECT 
+      dt.year AS time_key,
+      'YEAR' AS time_level,
+      dl.country,
+      sf.source_system,
+      SUM(sf.amount) AS total_revenue,
+      AVG(sf.amount) AS avg_revenue_per_transaction,
+      SUM(sf.quantity) AS total_units_sold,
+      AVG(sf.quantity) AS avg_units_per_transaction,
+      MIN(sf.quantity) AS min_units_per_transaction,
+      MAX(sf.quantity) AS max_units_per_transaction,
+      MIN(sf.amount) AS min_revenue_per_transaction,
+      MAX(sf.amount) AS max_revenue_per_transaction,
+      COUNT(DISTINCT sf.customer_key) AS customer_count,
+      COUNT(*) AS transaction_count
+    FROM sales_facts sf
+    JOIN dim_time dt ON sf.time_key = dt.time_key
+    JOIN dim_location dl ON sf.location_key = dl.location_key
+    GROUP BY dt.year, dl.country, sf.source_system
+  "
+  dbExecute(analyticsDbCon, yearQuery)
+  
+  cat("ETL Successful: time_agg_facts table loaded into analytical db.\n")
+}
+
+# Create Lookup Mappings
+createLookupMappings <- function(mysqlCon) {
+  cat("Creating lookup mappings...\n")
+  
+  # Customer mappings
+  customerMapping <- dbGetQuery(mysqlCon, 
+                                "SELECT customer_key, source_customer_id, source_system FROM dim_customer")
+  customerLookup <- setNames(
+    as.numeric(customerMapping$customer_key), 
+    trimws(paste(customerMapping$source_customer_id, customerMapping$source_system, sep = "-"))
   )
   
-  # Process film sales in batches, limiting records to prevent memory overload
-  offset <- 0
-  batchSize <- 1000
-  hasMoreRows <- TRUE
-  
-  while (hasMoreRows) {
-    # Extract film payment data with joins to get all needed information
-    filmSalesSQL <- sprintf("
-      SELECT 
-        p.payment_id,
-        date(p.payment_date) as payment_date,
-        p.customer_id,
-        co.country,
-        p.amount,
-        1 as units_sold  -- Assuming 1 unit per payment for films
-      FROM payment p
-      JOIN customer c ON p.customer_id = c.customer_id
-      JOIN address a ON c.address_id = a.address_id
-      JOIN city ci ON a.city_id = ci.city_id
-      JOIN country co ON ci.country_id = co.country_id
-      ORDER BY p.payment_id
-      LIMIT %d OFFSET %d
-    ", batchSize, offset)
-    
-    filmSales <- executeQuery(filmCon, filmSalesSQL)
-    
-    if (nrow(filmSales) == 0) {
-      hasMoreRows <- FALSE
-      next
-    }
-    
-    cat("[INFO] Processing batch of", nrow(filmSales), "film sales records from offset", offset, "\n")
-    
-    # Prepare batch data for fact_sales and fact_sales_obt tables
-    factBatchValues <- character(0)
-    obtBatchValues <- character(0)
-    
-    for (i in 1:nrow(filmSales)) {
-      paymentDate <- as.Date(filmSales$payment_date[i])
-      customerId <- filmSales$customer_id[i]
-      country <- filmSales$country[i]
-      amount <- filmSales$amount[i]
-      unitsSold <- filmSales$units_sold[i]
-      
-      # Skip if missing data
-      if (is.na(paymentDate) || is.na(customerId) || is.na(country)) {
-        next
-      }
-      
-      # Get time key from lookup
-      timeKey <- timeLookup[as.character(paymentDate)]
-      if (is.na(timeKey)) {
-        next
-      }
-      
-      # Get country key from lookup
-      countryKey <- countryLookup[country]
-      if (is.na(countryKey)) {
-        next
-      }
-      
-      # Get customer key from lookup
-      customerKey <- customerLookup[customerId]
-      if (is.na(customerKey)) {
-        next
-      }
-      
-      # Add to fact_sales batch
-      factBatchValues <- c(factBatchValues, 
-                           sprintf("(%d, %d, %d, %d, %d, %f)",
-                                   timeKey, customerKey, countryKey, 1, unitsSold, amount))
-      
-      # Get customer info
-      customerInfo <- customerInfoLookup[customerInfoLookup$source_id == customerId, ]
-      if (nrow(customerInfo) == 0) {
-        next
-      }
-      
-      # Get country name
-      countryName <- countryData$country_name[countryData$country_key == countryKey]
-      if (length(countryName) == 0) {
-        next
-      }
-      
-      # Calculate time dimension values
-      dayOfWeek <- weekdays(paymentDate)
-      dayOfMonth <- as.numeric(format(paymentDate, "%d"))
-      monthName <- months(paymentDate)
-      monthNumber <- as.numeric(format(paymentDate, "%m"))
-      quarter <- ceiling(monthNumber / 3)
-      year <- as.numeric(format(paymentDate, "%Y"))
-      
-      # Add to fact_sales_obt batch
-      obtBatchValues <- c(obtBatchValues,
-                          sprintf("('%s', '%s', %d, '%s', %d, %d, %d, %d, '%s', '%s', '%s', '%s', '%s', %d, %f)",
-                                  paymentDate, 
-                                  dayOfWeek, 
-                                  dayOfMonth, 
-                                  monthName, 
-                                  monthNumber, 
-                                  quarter, 
-                                  year,
-                                  customerId, 
-                                  gsub("'", "''", customerInfo$first_name[1]), 
-                                  gsub("'", "''", customerInfo$last_name[1]), 
-                                  gsub("'", "''", customerInfo$email[1]),
-                                  gsub("'", "''", countryName[1]), 
-                                  "Film", 
-                                  unitsSold, 
-                                  amount))
-    }
-    
-    # Insert fact_sales batch
-    if (length(factBatchValues) > 0) {
-      cat("[INFO] Inserting batch of", length(factBatchValues), "records into fact_sales\n")
-      factInsertSQL <- paste0("INSERT INTO fact_sales (time_key, customer_key, country_key, product_type_key, units_sold, revenue) VALUES ", 
-                              paste(factBatchValues, collapse = ", "))
-      executeSQL(mysqlCon, factInsertSQL)
-    }
-    
-    # Insert fact_sales_obt batch
-    if (length(obtBatchValues) > 0) {
-      cat("[INFO] Inserting batch of", length(obtBatchValues), "records into fact_sales_obt\n")
-      obtInsertSQL <- paste0("INSERT INTO fact_sales_obt (date, day_of_week, day_of_month, month_name, month_number, quarter, year, customer_id, customer_first_name, customer_last_name, customer_email, country_name, product_type, units_sold, revenue) VALUES ", 
-                             paste(obtBatchValues, collapse = ", "))
-      executeSQL(mysqlCon, obtInsertSQL)
-    }
-    
-    # Move to next batch
-    offset <- offset + batchSize
-    cat("[INFO] Completed processing", offset, "film sales records.\n")
-  }
-}
-
-# Function to load music sales data into fact tables with batch inserts
-loadMusicSales <- function(musicCon, mysqlCon) {
-  cat("[INFO] Loading music sales facts...\n")
-  
-  # Get all dimension lookups to avoid repeated queries
-  timeData <- executeQuery(mysqlCon, "SELECT time_key, date FROM dim_time")
-  timeLookup <- setNames(timeData$time_key, as.character(timeData$date))
-  
-  countryData <- executeQuery(mysqlCon, "SELECT country_key, country_name FROM dim_country")
-  countryLookup <- setNames(countryData$country_key, countryData$country_name)
-  
-  customerData <- executeQuery(mysqlCon, "SELECT customer_key, source_id, first_name, last_name, email, country_key, product_type_key FROM dim_customer WHERE product_type_key = 2")
-  customerLookup <- setNames(customerData$customer_key, customerData$source_id)
-  
-  # Create a lookup dataframe for customer info
-  customerInfoLookup <- data.frame(
-    source_id = customerData$source_id,
-    customer_key = customerData$customer_key,
-    first_name = customerData$first_name,
-    last_name = customerData$last_name,
-    email = customerData$email,
-    country_key = customerData$country_key,
-    stringsAsFactors = FALSE
+  # Product mappings
+  productMapping <- dbGetQuery(mysqlCon, 
+                               "SELECT product_key, source_product_id, source_system FROM dim_product")
+  productLookup <- setNames(
+    as.numeric(productMapping$product_key), 
+    trimws(paste(productMapping$source_product_id, productMapping$source_system, sep = "-"))
   )
   
-  # Process music sales in batches, limiting records to prevent memory overload
-  offset <- 0
-  batchSize <- 1000
-  hasMoreRows <- TRUE
+  # Location mappings
+  locationMapping <- dbGetQuery(mysqlCon, 
+                                "SELECT location_key, country, source_system, source_id FROM dim_location")
+  locationLookup <- setNames(
+    as.numeric(locationMapping$location_key),
+    trimws(paste(locationMapping$country, locationMapping$source_system, sep = "-"))
+  )
   
-  while (hasMoreRows) {
-    # Extract music sales data with joins to get all needed information
-    musicSalesSQL <- sprintf("
-      SELECT 
-        ii.InvoiceLineId,
-        date(i.InvoiceDate) as invoice_date,
-        i.CustomerId,
-        i.BillingCountry as country,
-        ii.UnitPrice * ii.Quantity as amount,
-        ii.Quantity as units_sold
-      FROM invoice_items ii
-      JOIN invoices i ON ii.InvoiceId = i.InvoiceId
-      ORDER BY ii.InvoiceLineId
-      LIMIT %d OFFSET %d
-    ", batchSize, offset)
-    
-    musicSales <- executeQuery(musicCon, musicSalesSQL)
-    
-    if (nrow(musicSales) == 0) {
-      hasMoreRows <- FALSE
-      next
-    }
-    
-    cat("[INFO] Processing batch of", nrow(musicSales), "music sales records from offset", offset, "\n")
-    
-    # Prepare batch data for fact_sales and fact_sales_obt tables
-    factBatchValues <- character(0)
-    obtBatchValues <- character(0)
-    
-    for (i in 1:nrow(musicSales)) {
-      invoiceDate <- as.Date(musicSales$invoice_date[i])
-      customerId <- musicSales$CustomerId[i]
-      country <- musicSales$country[i]
-      amount <- musicSales$amount[i]
-      unitsSold <- musicSales$units_sold[i]
-      
-      # Skip if missing data
-      if (is.na(invoiceDate) || is.na(customerId) || is.na(country)) {
-        next
-      }
-      
-      # Get time key from lookup
-      timeKey <- timeLookup[as.character(invoiceDate)]
-      if (is.na(timeKey)) {
-        next
-      }
-      
-      # Get country key from lookup
-      countryKey <- countryLookup[country]
-      if (is.na(countryKey)) {
-        next
-      }
-      
-      # Get customer key from lookup
-      customerKey <- customerLookup[customerId]
-      if (is.na(customerKey)) {
-        next
-      }
-      
-      # Add to fact_sales batch
-      factBatchValues <- c(factBatchValues, 
-                           sprintf("(%d, %d, %d, %d, %d, %f)",
-                                   timeKey, customerKey, countryKey, 2, unitsSold, amount))
-      
-      # Get customer info
-      customerInfo <- customerInfoLookup[customerInfoLookup$source_id == customerId, ]
-      if (nrow(customerInfo) == 0) {
-        next
-      }
-      
-      # Get country name
-      countryName <- countryData$country_name[countryData$country_key == countryKey]
-      if (length(countryName) == 0) {
-        next
-      }
-      
-      # Calculate time dimension values
-      dayOfWeek <- weekdays(invoiceDate)
-      dayOfMonth <- as.numeric(format(invoiceDate, "%d"))
-      monthName <- months(invoiceDate)
-      monthNumber <- as.numeric(format(invoiceDate, "%m"))
-      quarter <- ceiling(monthNumber / 3)
-      year <- as.numeric(format(invoiceDate, "%Y"))
-      
-      # Add to fact_sales_obt batch
-      obtBatchValues <- c(obtBatchValues,
-                          sprintf("('%s', '%s', %d, '%s', %d, %d, %d, %d, '%s', '%s', '%s', '%s', '%s', %d, %f)",
-                                  invoiceDate, 
-                                  dayOfWeek, 
-                                  dayOfMonth, 
-                                  monthName, 
-                                  monthNumber, 
-                                  quarter, 
-                                  year,
-                                  customerId, 
-                                  gsub("'", "''", customerInfo$first_name[1]), 
-                                  gsub("'", "''", customerInfo$last_name[1]), 
-                                  gsub("'", "''", customerInfo$email[1]),
-                                  gsub("'", "''", countryName[1]), 
-                                  "Music", 
-                                  unitsSold, 
-                                  amount))
-    }
-    
-    # Insert fact_sales batch
-    if (length(factBatchValues) > 0) {
-      cat("[INFO] Inserting batch of", length(factBatchValues), "records into fact_sales\n")
-      factInsertSQL <- paste0("INSERT INTO fact_sales (time_key, customer_key, country_key, product_type_key, units_sold, revenue) VALUES ", 
-                              paste(factBatchValues, collapse = ", "))
-      executeSQL(mysqlCon, factInsertSQL)
-    }
-    
-    # Insert fact_sales_obt batch
-    if (length(obtBatchValues) > 0) {
-      cat("[INFO] Inserting batch of", length(obtBatchValues), "records into fact_sales_obt\n")
-      obtInsertSQL <- paste0("INSERT INTO fact_sales_obt (date, day_of_week, day_of_month, month_name, month_number, quarter, year, customer_id, customer_first_name, customer_last_name, customer_email, country_name, product_type, units_sold, revenue) VALUES ", 
-                             paste(obtBatchValues, collapse = ", "))
-      executeSQL(mysqlCon, obtInsertSQL)
-    }
-    
-    # Move to next batch
-    offset <- offset + batchSize
-    cat("[INFO] Completed processing", offset, "music sales records.\n")
+  return(list(
+    customerLookup = customerLookup,
+    productLookup = productLookup,
+    locationLookup = locationLookup
+  ))
+}
+
+verifyDimensionTableLoading <- function(analyticsDbCon) {
+  cat("Verify dimension table loading: \n")
+  for (table in c("dim_customer", "dim_product", "dim_location", "dim_time")) {
+    count <- dbGetQuery(analyticsDbCon, paste0("SELECT COUNT(*) AS count FROM ", table))
+    cat(table, ": ", count$count, "\n")
   }
 }
 
-# Function to clear fact tables
-clearFactTables <- function(mysqlCon) {
-  cat("[INFO] Clearing fact tables...\n")
-  executeSQL(mysqlCon, "DELETE FROM fact_sales;")
-  executeSQL(mysqlCon, "DELETE FROM fact_sales_obt;")
+verifyFactTableLoading <- function(filmSalesDbCon, musicSalesDbCon, analyticsDbCon) {
+  cat("\n Verify fact table loading: \n")
+  
+  # Get distinct countries from source databases
+  filmCountries <- dbGetQuery(filmSalesDbCon, "SELECT DISTINCT country FROM country")
+  musicCountries <- dbGetQuery(musicSalesDbCon, "SELECT DISTINCT Country AS country FROM customers WHERE Country IS NOT NULL")
+  
+  # Combine and deduplicate source countries
+  combinedSourceCountries <- unique(rbind(filmCountries, musicCountries))
+  
+  # Get distinct countries from the datamart
+  dwCountries <- dbGetQuery(analyticsDbCon, "SELECT DISTINCT country FROM dim_location WHERE country IS NOT NULL")
+  
+  cat("[Validation] Countries in FILM + MUSIC sources:", nrow(combinedSourceCountries), "\n")
+  cat("[Validation] Countries in Data Warehouse:", nrow(dwCountries), "\n")
 }
 
-# Function to load all sales facts
-loadSalesFacts <- function(filmCon, musicCon, mysqlCon) {
-  cat("[INFO] Loading sales facts...\n")
-  
-  # Clear existing fact data
-  clearFactTables(mysqlCon)
-  
-  # Load film and music sales
-  loadFilmSales(filmCon, mysqlCon)
-  loadMusicSales(musicCon, mysqlCon)
-  
-  # Verify loading
-  salesCount <- executeQuery(mysqlCon, "SELECT COUNT(*) as count FROM fact_sales")
-  obtCount <- executeQuery(mysqlCon, "SELECT COUNT(*) as count FROM fact_sales_obt")
-  cat("[INFO] Loaded", salesCount$count, "sales fact records and", obtCount$count, "OBT records.\n")
-}
-
-# Function to validate facts
-validateFacts <- function(filmCon, musicCon, mysqlCon) {
-  cat("[INFO] Validating fact tables...\n")
-  
-  # Validate film customers count
-  filmCustomersCount <- executeQuery(filmCon, "SELECT COUNT(DISTINCT customer_id) as count FROM customer")
-  dwFilmCustomersCount <- executeQuery(mysqlCon, "SELECT COUNT(*) as count FROM dim_customer WHERE product_type_key = 1")
-  
-  cat("[VALIDATION] Film customers in source:", filmCustomersCount$count, "\n")
-  cat("[VALIDATION] Film customers in datamart:", dwFilmCustomersCount$count, "\n")
-  
-  # Validate music customers count
-  musicCustomersCount <- executeQuery(musicCon, "SELECT COUNT(DISTINCT CustomerId) as count FROM customers")
-  dwMusicCustomersCount <- executeQuery(mysqlCon, "SELECT COUNT(*) as count FROM dim_customer WHERE product_type_key = 2")
-  
-  cat("[VALIDATION] Music customers in source:", musicCustomersCount$count, "\n")
-  cat("[VALIDATION] Music customers in datamart:", dwMusicCustomersCount$count, "\n")
-  
-  # Validate film sales amount
-  filmSalesAmount <- executeQuery(filmCon, "SELECT SUM(amount) as total FROM payment")
-  dwFilmSalesAmount <- executeQuery(mysqlCon, "SELECT SUM(revenue) as total FROM fact_sales WHERE product_type_key = 1")
-  
-  cat("[VALIDATION] Film sales amount in source:", filmSalesAmount$total, "\n")
-  cat("[VALIDATION] Film sales amount in datamart:", dwFilmSalesAmount$total, "\n")
-  
-  # Validate music sales amount
-  musicSalesAmount <- executeQuery(musicCon, "
-    SELECT SUM(UnitPrice * Quantity) as total 
-    FROM invoice_items
+# Validate Fact Tables
+validateFacts <- function(filmSalesDbCon, musicSalesDbCon, analyticsDbCon) {
+  # Revenue match - FILM
+  filmRevenueSource <- dbGetQuery(filmSalesDbCon, "
+    SELECT SUM(amount) AS total_revenue FROM payment
   ")
-  dwMusicSalesAmount <- executeQuery(mysqlCon, "SELECT SUM(revenue) as total FROM fact_sales WHERE product_type_key = 2")
+  filmRevenueDW <- dbGetQuery(analyticsDbCon, "
+    SELECT SUM(amount) AS total_revenue FROM sales_facts WHERE source_system = 'FILM'
+  ")
+  cat("[Validation] Film Revenue (Source vs DW):", 
+      round(filmRevenueSource$total_revenue, 2), "vs", round(filmRevenueDW$total_revenue, 2), "\n")
   
-  cat("[VALIDATION] Music sales amount in source:", musicSalesAmount$total, "\n")
-  cat("[VALIDATION] Music sales amount in datamart:", dwMusicSalesAmount$total, "\n")
-  
-  # Validate country counts
-  filmCountryCount <- executeQuery(filmCon, "SELECT COUNT(*) as count FROM country")
-  musicCountryCount <- executeQuery(musicCon, "SELECT COUNT(DISTINCT Country) as count FROM customers WHERE Country IS NOT NULL")
-  dwCountryCount <- executeQuery(mysqlCon, "SELECT COUNT(*) as count FROM dim_country")
-  
-  cat("[VALIDATION] Film countries in source:", filmCountryCount$count, "\n")
-  cat("[VALIDATION] Music countries in source:", musicCountryCount$count, "\n")
-  cat("[VALIDATION] Countries in datamart:", dwCountryCount$count, "\n")
+  # Revenue match - MUSIC
+  musicRevenueSource <- dbGetQuery(musicSalesDbCon, "
+    SELECT SUM(UnitPrice * Quantity) AS total_revenue FROM invoice_items
+  ")
+  musicRevenueDW <- dbGetQuery(analyticsDbCon, "
+    SELECT SUM(amount) AS total_revenue FROM sales_facts WHERE source_system = 'MUSIC'
+  ")
+  cat("[Validation] Music Revenue (Source vs DW):", 
+      round(musicRevenueSource$total_revenue, 2), "vs", round(musicRevenueDW$total_revenue, 2), "\n")
 }
 
-# Main
+# Execute Custom ETL Process
+executeCustomETL <- function(filmSalesDbCon, musicSalesDbCon, analyticsDbCon) {
+  cat("Executing ETL process...\n")
+  
+  # perform ETL for dimension tables
+  locationDataETL(filmSalesDbCon, musicSalesDbCon, analyticsDbCon)
+  customerDataETL(filmSalesDbCon, musicSalesDbCon, analyticsDbCon)
+  productDataETL(filmSalesDbCon, musicSalesDbCon, analyticsDbCon)
+  timeDataETL(analyticsDbCon)
+  
+  # create lookup mappings for dimension keys
+  lookups <- createLookupMappings(analyticsDbCon)
+  
+  # perform ETL for fact tables
+  salesDataETL(filmSalesDbCon, musicSalesDbCon, analyticsDbCon, lookups)
+  timeAggregatedFactsETL(analyticsDbCon)
+  printLine()
+  
+  # Validation
+  cat("Validating...\n")
+  verifyDimensionTableLoading(analyticsDbCon)
+  verifyFactTableLoading(filmSalesDbCon, musicSalesDbCon, analyticsDbCon)
+  validateFacts(filmSalesDbCon, musicSalesDbCon, analyticsDbCon)
+  printLine()
+}
+
+# Main Method
 main <- function() {
-  installPackagesOnDemand(c("RMySQL", "RSQLite", "DBI"))
-  loadRequiredPackages(c("RMySQL", "RSQLite", "DBI"))
+  # required packages
+  packages <- c("RMySQL", "DBI", "RSQLite")
   
-  # Connect to databases
-  mysqlCon <- connectToMySQL()
-  if (is.character(mysqlCon)) {
-    cat("[ERROR] MySQL connection failed: ", mysqlCon, "\n")
-    return()
-  }
+  # install and load required packages
+  installPackagesOnDemand(packages)
+  loadRequiredPackages(packages)
   
-  # Check if required tables exist
-  if (!checkRequiredTables(mysqlCon)) {
-    cat("[ERROR] Missing required tables. Please run createStarSchema.R first.\n")
-    dbDisconnect(mysqlCon)
-    return()
-  }
+  # connect to databases
+  analyticsDbCon <- connectToMySQLDatabase()
+  filmSalesDbCon <- connectToSQLiteDb("film-sales.db")
+  musicSalesDbCon <- connectToSQLiteDb("music-sales.db")
   
-  filmCon <- connectToFilmDB()
-  if (is.character(filmCon)) {
-    cat("[ERROR] Film DB connection failed: ", filmCon, "\n")
-    dbDisconnect(mysqlCon)
-    return()
-  }
+  # execute ETL
+  executeCustomETL(filmSalesDbCon, musicSalesDbCon, analyticsDbCon)
   
-  musicCon <- connectToMusicDB()
-  if (is.character(musicCon)) {
-    cat("[ERROR] Music DB connection failed: ", musicCon, "\n")
-    dbDisconnect(mysqlCon)
-    dbDisconnect(filmCon)
-    return()
-  }
-  
-  cat("[INFO] Connected to all databases.\n")
-  
-  # Load dimensions
-  loadTimeDimension(filmCon, musicCon, mysqlCon)
-  loadCountryDimension(filmCon, musicCon, mysqlCon)
-  loadCustomerDimension(filmCon, musicCon, mysqlCon)
-  
-  # Load facts
-  loadSalesFacts(filmCon, musicCon, mysqlCon)
-  
-  # Validate facts
-  validateFacts(filmCon, musicCon, mysqlCon)
-  
-  # Close connections
-  dbDisconnect(mysqlCon)
-  dbDisconnect(filmCon)
-  dbDisconnect(musicCon)
-  cat("[INFO] All database connections closed.\n")
+  # disconnect from database
+  dbDisconnect(analyticsDbCon)
 }
 
+# execute the script
 main()

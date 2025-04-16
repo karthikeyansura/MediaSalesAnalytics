@@ -1,381 +1,305 @@
-# Title: Part B / Create Analytics Datamart - FIXED
-# Course Name: CS5200 Database Management Systems
-# Author: Your Name
-# Semester: Spring 2025
+# title: "Part B / Create Analytics Datamart"
+# author: "Sai Karthikeyan, Sura"
+# date: "Spring 2025"
 
-# Function to install packages on demand
+# Install Required Packages
 installPackagesOnDemand <- function(packages) {
   installed_packages <- packages %in% rownames(installed.packages())
-  if (any(!installed_packages)) {
+  if (any(installed_packages == FALSE)) {
     install.packages(packages[!installed_packages])
   }
 }
 
-# Function to load required packages
+# Load Required Packages
 loadRequiredPackages <- function(packages) {
+  # load required packages
   for (package in packages) {
-    suppressMessages(library(package, character.only = TRUE))
+    suppressMessages({
+      library(package, character.only = TRUE)
+    })
   }
 }
 
-# Function to release Aiven connections if threshold is exceeded
-releaseAivenConnections <- function(threshold = 15) {
-  active_cons <- dbListConnections(RMySQL::MySQL())
-  if (length(active_cons) >= threshold) {
-    cat("[INFO] Threshold reached. Disconnecting existing MySQL connections...\n")
-    for (con in active_cons) {
-      dbDisconnect(con)
+# Close Db Connections Over Threshold
+closeDbConnectionsOverThreshold <- function() {
+  threshold <- 10 # Aiven allows 16 open connections, threshold is set to 10
+  currentOpenConnections <- dbListConnections(MySQL())
+  if (length(currentOpenConnections) > threshold) {
+    for (conn in currentOpenConnections) {
+      dbDisconnect(conn)
     }
-    cat("[INFO] Existing MySQL connections closed.\n")
   }
 }
 
-# Function to connect to the cloud MySQL database
-connectAndCheckDatabase <- function() {
-  
-  releaseAivenConnections()
-  
+# Connect to MySQL Database
+connectToMySQLDatabase <- function() {
+  # db credentials
   dbName <- "defaultdb"
   dbUser <- "avnadmin"
   dbPassword <- "AVNS_4zUOM58G58RIBn3nQqg"
   dbHost <- "dbserver-cs5200-media-sales-analytics.b.aivencloud.com"
   dbPort <- 17041
-  con <- tryCatch(
-    {
-      dbConnect(
-        RMySQL::MySQL(),
-        user = dbUser,
-        password = dbPassword,
-        dbname = dbName,
-        host = dbHost,
-        port = dbPort
-      )
-    },
-    error = function(e) {
-      return(e$message)
-    }
-  )
-  return(con)
+  
+  tryCatch({
+    closeDbConnectionsOverThreshold()
+    dbCon <- dbConnect(
+      RMySQL::MySQL(),
+      user = dbUser,
+      password = dbPassword,
+      dbname = dbName,
+      host = dbHost,
+      port = dbPort
+    )
+    cat("Connected to database successfully.\n")
+    return(dbCon)
+  }, error = function(err) {
+    cat("Error connecting to database:", err$message, "\n")
+    stop("Database connection failed.")
+  })
 }
 
-# Function to execute SQL statement with error handling
-executeSQL <- function(con, sqlStatement, silent = FALSE) {
-  result <- tryCatch(
-    {
-      if (!silent) cat("[SQL] Executing:", sqlStatement, "\n")
-      dbExecute(con, sqlStatement)
-    },
-    error = function(e) {
-      cat("[ERROR] SQL execution failed:", e$message, "\n")
-      cat("[SQL] Failed statement:", sqlStatement, "\n")
-      return(NULL)
-    }
-  )
-  if (!is.null(result) && !silent) {
-    cat("[SQL] Execution successful. Rows affected:", result, "\n")
+# Print Line Separator
+printLine <- function() {
+  cat("--------------------------------------------------\n")
+}
+
+# Drop Table If Exists
+dropTable <- function(dbCon, tableName) {
+  # drop table if exists
+  sqlQueryToDropTable <- paste("DROP TABLE IF EXISTS", tableName, ";")
+  dbExecute(dbCon, sqlQueryToDropTable)
+  cat("Dropped table:", tableName, "\n")
+}
+
+# Drop All Tables
+dropAllTables <- function(dbCon) {
+  # drop all fact tables
+  cat("Dropping fact tables...\n")
+  
+  factTables <- c("sales_facts", "time_agg_facts")
+  
+  for (table in factTables) {
+    dropTable(dbCon, table)
   }
-  return(result)
+  
+  # drop all dimension tables
+  cat("Dropping dimension tables...\n")
+  
+  dimensionTables <- c("dim_product", "dim_customer", "dim_time", "dim_location", "dim_prouct_type")
+  
+  for (table in dimensionTables) {
+    dropTable(dbCon, table)
+  }
+  
+  printLine()
 }
 
-# Function to create time dimension table
-createTimeDimension <- function(con) {
-  cat("[INFO] Creating time dimension table...\n")
-  
-  # Drop existing dimension if exists
-  executeSQL(con, "DROP TABLE IF EXISTS dim_time;")
-  
-  # Create time dimension table
-  sql <- "
-  CREATE TABLE dim_time (
-    time_key INT PRIMARY KEY,
-    date DATE NOT NULL,
-    day_of_week VARCHAR(10),
-    day_of_month INT,
-    month_name VARCHAR(10),
-    month_number INT,
-    quarter INT,
-    year INT,
-    UNIQUE INDEX idx_date (date),
-    INDEX idx_year_quarter (year, quarter)
-  );
+createProductDimensionTable <- function(dbCon) {
+  # SQL query to create product dimension table
+  sqlQuery <- "
+    CREATE TABLE dim_product (
+    product_key INT AUTO_INCREMENT PRIMARY KEY,
+    source_product_id VARCHAR(20) NOT NULL,
+    source_system VARCHAR(10) NOT NULL,
+    product_type VARCHAR(10) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    category_genre VARCHAR(25),
+    artist_actor VARCHAR(100),
+    release_year SMALLINT,
+    language VARCHAR(20),
+    media_type VARCHAR(50),
+    unit_price DECIMAL(10,2),
+    duration INT,
+    last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    );
   "
-  executeSQL(con, sql)
+  
+  # execute SQL query
+  dbExecute(dbCon, sqlQuery)
+  cat("Created table:  dim_product\n")
 }
 
-# Function to create country dimension table
-createCountryDimension <- function(con) {
-  cat("[INFO] Creating country dimension table...\n")
-  
-  # Drop existing dimension if exists
-  executeSQL(con, "DROP TABLE IF EXISTS dim_country;")
-  
-  # Create country dimension table
-  sql <- "
-  CREATE TABLE dim_country (
-    country_key INT AUTO_INCREMENT PRIMARY KEY,
-    country_name VARCHAR(50) NOT NULL,
-    region VARCHAR(50),
-    UNIQUE INDEX idx_country_name (country_name)
-  );
-  "
-  executeSQL(con, sql)
-}
-
-# Function to create product type dimension table
-createProductTypeDimension <- function(con) {
-  cat("[INFO] Creating product type dimension table...\n")
-  
-  # Drop existing dimension if exists
-  executeSQL(con, "DROP TABLE IF EXISTS dim_product_type;")
-  
-  # Create product type dimension table
-  sql <- "
-  CREATE TABLE dim_product_type (
-    product_type_key INT PRIMARY KEY,
-    product_type VARCHAR(20) NOT NULL,
-    description VARCHAR(255)
-  );
-  "
-  executeSQL(con, sql)
-  
-  # Insert product types
-  executeSQL(con, "INSERT INTO dim_product_type VALUES (1, 'Film', 'Film products');")
-  executeSQL(con, "INSERT INTO dim_product_type VALUES (2, 'Music', 'Music products');")
-}
-
-# Function to create customer dimension table
-createCustomerDimension <- function(con) {
-  cat("[INFO] Creating customer dimension table...\n")
-  
-  # Drop existing dimension if exists
-  executeSQL(con, "DROP TABLE IF EXISTS dim_customer;")
-  
-  # Create customer dimension table
-  sql <- "
-  CREATE TABLE dim_customer (
+createCustomerDimensionTable <- function(dbCon) {
+  # SQL query to create customer dimension table
+  sqlQuery <- "
+    CREATE TABLE dim_customer (
     customer_key INT AUTO_INCREMENT PRIMARY KEY,
-    source_id INT NOT NULL,
-    product_type_key INT NOT NULL,
-    first_name VARCHAR(50),
-    last_name VARCHAR(50),
-    email VARCHAR(100),
-    country_key INT,
-    UNIQUE INDEX idx_source_product (source_id, product_type_key),
-    INDEX idx_country (country_key),
-    FOREIGN KEY (product_type_key) REFERENCES dim_product_type(product_type_key),
-    FOREIGN KEY (country_key) REFERENCES dim_country(country_key)
-  );
+    source_customer_id VARCHAR(20) NOT NULL,
+    source_system VARCHAR(10) NOT NULL,
+    first_name VARCHAR(45) NOT NULL,
+    last_name VARCHAR(45) NOT NULL,
+    email VARCHAR(60),
+    active BOOLEAN DEFAULT TRUE,
+    create_date DATETIME,
+    last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    );
   "
-  executeSQL(con, sql)
+  
+  # execute SQL query
+  dbExecute(dbCon, sqlQuery)
+  cat("Created table:  dim_customer\n")
 }
 
-# Function to create sales fact table
-createSalesFact <- function(con) {
-  cat("[INFO] Creating sales fact table...\n")
+createTimeDimensionTable <- function(dbCon) {
+  # SQL query to create time dimension table
+  sqlQuery <- "
+    CREATE TABLE dim_time (
+    time_key INT PRIMARY KEY,
+    full_date DATE NOT NULL,
+    day_of_week VARCHAR(10) NOT NULL,
+    day_num_in_month TINYINT NOT NULL,
+    day_num_in_year SMALLINT NOT NULL,
+    month_num TINYINT NOT NULL,
+    month_name VARCHAR(10) NOT NULL,
+    quarter TINYINT NOT NULL,
+    year SMALLINT NOT NULL,
+    weekend_flag BOOLEAN NOT NULL,
+    holiday_flag BOOLEAN DEFAULT FALSE
+    );
+  "
+  # execute SQL query
+  dbExecute(dbCon, sqlQuery)
+  cat("Created table:  dim_time\n")
+}
+
+createLocationDimensionTable <- function(dbCon) {
+  # SQL query to create location dimension table
+  sqlQuery <- "
+    CREATE TABLE dim_location (
+    location_key INT AUTO_INCREMENT PRIMARY KEY,
+    source_id VARCHAR(20),
+    source_system VARCHAR(10) NOT NULL,
+    address VARCHAR(70),
+    city VARCHAR(50),
+    state_province VARCHAR(40),
+    postal_code VARCHAR(10),
+    country VARCHAR(50) NOT NULL,
+    region VARCHAR(30),
+    last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    );
+  "
   
-  # Drop existing fact if exists
-  executeSQL(con, "DROP TABLE IF EXISTS fact_sales;")
+  # execute SQL query
+  dbExecute(dbCon, sqlQuery)
+  cat("Created table:  dim_location\n")
+}
+
+createDimensionTables <- function(dbCon) {
+  # create dimension tables
+  cat("Creating dimension tables...\n")
   
-  # Create sales fact table
-  sql <- "
-  CREATE TABLE fact_sales (
-    sales_key BIGINT AUTO_INCREMENT PRIMARY KEY,
+  # create dim_product table
+  createProductDimensionTable(dbCon)
+  
+  # create dim_customer table
+  createCustomerDimensionTable(dbCon)
+  
+  # create dim_time table
+  createTimeDimensionTable(dbCon)
+  
+  # create dim_location table
+  createLocationDimensionTable(dbCon)
+  
+  printLine()
+}
+
+createSalesFactTable <- function(dbCon) {
+  # SQL query to create sales fact table
+  sqlQuery <- "
+    CREATE TABLE sales_facts (
+    sales_fact_id BIGINT AUTO_INCREMENT PRIMARY KEY,
     time_key INT NOT NULL,
     customer_key INT NOT NULL,
-    country_key INT NOT NULL,
-    product_type_key INT NOT NULL,
-    units_sold INT NOT NULL,
-    revenue DECIMAL(10,2) NOT NULL,
-    INDEX idx_time (time_key),
-    INDEX idx_customer (customer_key),
-    INDEX idx_country (country_key),
-    INDEX idx_product_type (product_type_key),
+    product_key INT NOT NULL,
+    location_key INT NOT NULL,
+    
+    source_system VARCHAR(10) NOT NULL,
+    source_transaction_id VARCHAR(20) NOT NULL,
+    transaction_date DATETIME NOT NULL,
+    
+    quantity INT NOT NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    
     FOREIGN KEY (time_key) REFERENCES dim_time(time_key),
     FOREIGN KEY (customer_key) REFERENCES dim_customer(customer_key),
-    FOREIGN KEY (country_key) REFERENCES dim_country(country_key),
-    FOREIGN KEY (product_type_key) REFERENCES dim_product_type(product_type_key)
-  );
+    FOREIGN KEY (product_key) REFERENCES dim_product(product_key),
+    FOREIGN KEY (location_key) REFERENCES dim_location(location_key)
+    );
   "
-  executeSQL(con, sql)
   
-  # Create monthly indexes to help with performance
-  executeSQL(con, "CREATE INDEX idx_sales_time_country ON fact_sales (time_key, country_key);")
-  executeSQL(con, "CREATE INDEX idx_sales_time_product ON fact_sales (time_key, product_type_key);")
+  # execute SQL query
+  dbExecute(dbCon, sqlQuery)
+  cat("Created table:  sales_facts\n")
 }
 
-# Function to create an OBT (One Big Table) fact table
-createOBTFact <- function(con) {
-  cat("[INFO] Creating One Big Table (OBT) fact table...\n")
-  
-  # Drop existing OBT if exists
-  executeSQL(con, "DROP TABLE IF EXISTS fact_sales_obt;")
-  
-  # Create OBT fact table
-  sql <- "
-  CREATE TABLE fact_sales_obt (
-    sales_obt_key BIGINT AUTO_INCREMENT PRIMARY KEY,
+createTimeAggFactTable <- function(dbCon) {
+  # SQL query to create time_agg_facts table
+  sqlQuery <- "
+    CREATE TABLE time_agg_facts (
+    time_agg_key BIGINT AUTO_INCREMENT PRIMARY KEY,
     
-    -- Time dimension fields
-    date DATE NOT NULL,
-    day_of_week VARCHAR(10),
-    day_of_month INT,
-    month_name VARCHAR(10),
-    month_number INT,
-    quarter INT,
-    year INT,
+    time_key INT NOT NULL,
+    time_level VARCHAR(10) NOT NULL,
+    country VARCHAR(50) NOT NULL,
+    source_system VARCHAR(10) NOT NULL,
     
-    -- Customer dimension fields
-    customer_id INT NOT NULL,
-    customer_first_name VARCHAR(50),
-    customer_last_name VARCHAR(50),
-    customer_email VARCHAR(100),
+    total_revenue DECIMAL(14,2) NOT NULL,
+    avg_revenue_per_transaction DECIMAL(12,2) NOT NULL,
+    total_units_sold INT NOT NULL,
+    avg_units_per_transaction DECIMAL(10,2) NOT NULL,
+    min_units_per_transaction INT NOT NULL,
+    max_units_per_transaction INT NOT NULL,
+    min_revenue_per_transaction DECIMAL(10,2) NOT NULL,
+    max_revenue_per_transaction DECIMAL(10,2) NOT NULL,
+    customer_count INT NOT NULL,
+    transaction_count INT NOT NULL,
     
-    -- Country dimension fields
-    country_name VARCHAR(50) NOT NULL,
-    region VARCHAR(50),
-    
-    -- Product type dimension field
-    product_type VARCHAR(20) NOT NULL,
-    
-    -- Metrics
-    units_sold INT NOT NULL,
-    revenue DECIMAL(10,2) NOT NULL,
-    
-    -- Indexes for better performance
-    INDEX idx_date (date),
-    INDEX idx_year_quarter (year, quarter),
-    INDEX idx_country (country_name),
-    INDEX idx_product_type (product_type)
-  );
+    UNIQUE INDEX idx_time_agg_unique (time_key, time_level, country, source_system)
+    );
   "
-  executeSQL(con, sql)
   
-  # Create composite indexes for common query patterns
-  executeSQL(con, "CREATE INDEX idx_obt_country_product ON fact_sales_obt (country_name, product_type);")
-  executeSQL(con, "CREATE INDEX idx_obt_year_quarter_product ON fact_sales_obt (year, quarter, product_type);")
+  # execute SQL query
+  dbExecute(dbCon, sqlQuery)
+  cat("Created table:  time_agg_facts\n")
 }
 
-# Function to create sales aggregation view by time
-createSalesAggTimeView <- function(con) {
-  cat("[INFO] Creating time-based sales aggregation view...\n")
+createFactTables <- function(dbCon) {
+  # create fact tables
+  cat("Creating fact tables...\n")
   
-  # Drop existing view if exists
-  executeSQL(con, "DROP VIEW IF EXISTS view_sales_by_time;")
+  # create sales_facts table
+  createSalesFactTable(dbCon)
   
-  # Create aggregated view by time
-  sql <- "
-  CREATE VIEW view_sales_by_time AS
-  SELECT 
-    dt.year,
-    dt.quarter,
-    dt.month_number,
-    dt.month_name,
-    dp.product_type,
-    SUM(fs.units_sold) AS total_units,
-    AVG(fs.units_sold) AS avg_units,
-    MIN(fs.units_sold) AS min_units,
-    MAX(fs.units_sold) AS max_units,
-    SUM(fs.revenue) AS total_revenue,
-    AVG(fs.revenue) AS avg_revenue,
-    MIN(fs.revenue) AS min_revenue,
-    MAX(fs.revenue) AS max_revenue,
-    COUNT(DISTINCT fs.customer_key) AS customer_count
-  FROM fact_sales fs
-  JOIN dim_time dt ON fs.time_key = dt.time_key
-  JOIN dim_product_type dp ON fs.product_type_key = dp.product_type_key
-  GROUP BY dt.year, dt.quarter, dt.month_number, dt.month_name, dp.product_type
-  WITH ROLLUP;
-  "
-  executeSQL(con, sql)
+  # create time_agg_facts table
+  createTimeAggFactTable(dbCon)
+  
+  printLine()
 }
 
-# Function to create sales aggregation view by country
-createSalesAggCountryView <- function(con) {
-  cat("[INFO] Creating country-based sales aggregation view...\n")
-  
-  # Drop existing view if exists
-  executeSQL(con, "DROP VIEW IF EXISTS view_sales_by_country;")
-  
-  # Create aggregated view by country
-  sql <- "
-  CREATE VIEW view_sales_by_country AS
-  SELECT 
-    dc.country_name,
-    dp.product_type,
-    dt.year,
-    dt.quarter,
-    SUM(fs.units_sold) AS total_units,
-    AVG(fs.units_sold) AS avg_units,
-    MIN(fs.units_sold) AS min_units,
-    MAX(fs.units_sold) AS max_units,
-    SUM(fs.revenue) AS total_revenue,
-    AVG(fs.revenue) AS avg_revenue,
-    MIN(fs.revenue) AS min_revenue,
-    MAX(fs.revenue) AS max_revenue,
-    COUNT(DISTINCT fs.customer_key) AS customer_count
-  FROM fact_sales fs
-  JOIN dim_country dc ON fs.country_key = dc.country_key
-  JOIN dim_product_type dp ON fs.product_type_key = dp.product_type_key
-  JOIN dim_time dt ON fs.time_key = dt.time_key
-  GROUP BY dc.country_name, dp.product_type, dt.year, dt.quarter
-  WITH ROLLUP;
-  "
-  executeSQL(con, sql)
-}
-
-# Function to create customer count aggregation view
-createCustomerCountView <- function(con) {
-  cat("[INFO] Creating customer count aggregation view...\n")
-  
-  # Drop existing view if exists
-  executeSQL(con, "DROP VIEW IF EXISTS view_customer_count;")
-  
-  # Create customer count aggregation view
-  sql <- "
-  CREATE VIEW view_customer_count AS
-  SELECT 
-    dc.country_name,
-    dp.product_type,
-    COUNT(DISTINCT c.customer_key) AS customer_count
-  FROM dim_customer c
-  JOIN dim_country dc ON c.country_key = dc.country_key
-  JOIN dim_product_type dp ON c.product_type_key = dp.product_type_key
-  GROUP BY dc.country_name, dp.product_type
-  WITH ROLLUP;
-  "
-  executeSQL(con, sql)
-}
-
-# Main
+# Main Method
 main <- function() {
-  installPackagesOnDemand(c("RMySQL", "DBI"))
-  loadRequiredPackages(c("RMySQL", "DBI"))
+  # required packages
+  packages <- c("RMySQL")
   
-  # Connect to cloud MySQL and initialize schema
-  con <- connectAndCheckDatabase()
-  if (is.character(con)) {
-    cat("[ERROR] MySQL connection failed: ", con, "\n")
-  } else {
-    cat("[INFO] Connected to MySQL database.\n")
-    
-    # Create dimension tables
-    createTimeDimension(con)
-    createCountryDimension(con)
-    createProductTypeDimension(con)
-    createCustomerDimension(con)
-    
-    # Create fact tables
-    createSalesFact(con)
-    createOBTFact(con)
-    
-    # Create aggregation views
-    createSalesAggTimeView(con)
-    createSalesAggCountryView(con)
-    createCustomerCountView(con)
-    
-    dbDisconnect(con)
-    cat("[INFO] MySQL connection closed.\n")
-  }
+  # install and load required packages
+  installPackagesOnDemand(packages)
+  loadRequiredPackages(packages)
+  
+  # connect to database
+  mySqlDbCon <- connectToMySQLDatabase()
+  
+  # drop all tables
+  dropAllTables(mySqlDbCon)
+  
+  # create dimension tables
+  createDimensionTables(mySqlDbCon)
+  
+  # create fact tables
+  createFactTables(mySqlDbCon)
+  
+  # disconnect from database
+  dbDisconnect(mySqlDbCon)
 }
 
+# execute the script
 main()
