@@ -22,11 +22,11 @@ connectToCloudDatabase <- function() {
   releaseAivenConnections()
   
   DBI::dbConnect(RMySQL::MySQL(),
-                 user = "avnadmin",
-                 password = "AVNS_4zUOM58G58RIBn3nQqg",
-                 dbname = "defaultdb",
-                 host = "dbserver-cs5200-media-sales-analytics.b.aivencloud.com",
-                 port = 17041)
+                 user = "",
+                 password = "",
+                 dbname = "",
+                 host = "",
+                 port = )
 }
 
 dropTablesAndViews <- function(con) {
