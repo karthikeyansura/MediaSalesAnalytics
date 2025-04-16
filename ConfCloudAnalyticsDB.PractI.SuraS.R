@@ -37,11 +37,11 @@ connectAndCheckDatabase <- function() {
   
   releaseAivenConnections()
   
-  dbName <- "defaultdb"
-  dbUser <- "avnadmin"
-  dbPassword <- "AVNS_4zUOM58G58RIBn3nQqg"
-  dbHost <- "dbserver-cs5200-media-sales-analytics.b.aivencloud.com"
-  dbPort <- 17041
+  dbName <- ""
+  dbUser <- ""
+  dbPassword <- ""
+  dbHost <- ""
+  dbPort <- 
   con <- tryCatch(
     {
       dbConnect(
